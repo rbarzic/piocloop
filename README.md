@@ -45,6 +45,22 @@ piloop bootstrap .               # create starter PLAN.md and .loop-prompt.md
 piloop run --model zai/glm-5.2
 ```
 
+### Using an OpenRouter model
+
+Set your OpenRouter API key, then prefix the OpenRouter model ID with
+`openrouter/`. For example, Kimi K3 is `moonshotai/kimi-k3` on OpenRouter:
+
+```bash
+export OPENROUTER_API_KEY="your-openrouter-api-key"
+piloop run --model openrouter/moonshotai/kimi-k3
+```
+
+You can check that PI's model catalog contains it with:
+
+```bash
+pi --list-models openrouter | grep kimi-k3
+```
+
 ### `piloop run`
 
 | Option | Default | Meaning |
