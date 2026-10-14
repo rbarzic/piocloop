@@ -18,9 +18,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable, Optional, Protocol, Sequence
+from typing import Callable, Optional, Protocol, Sequence
 
 from .pi_client import PiClient, PiError, PiExited, PiTimeout
 from .pi_events import (
@@ -43,6 +44,7 @@ from .plan_parser import (
     read_plan_complete_summary,
     read_plan_progress,
 )
+from .schedule import Schedule, ScheduleDecision
 
 # --- states ---------------------------------------------------------------
 
@@ -75,6 +77,8 @@ class LoopConfig:
     max_error_streak: int = 3
     error_backoff_base: float = 2.0
     command_timeout: float = 15.0  # deadline for get_state / abort round-trips
+    schedule: Optional[Schedule] = None
+    schedule_poll_interval: float = 1.0  # bounded wall-clock/suspend reevaluation
 
 
 class LoopUI(Protocol):
@@ -107,10 +111,15 @@ class LoopEngine:
         ui: Optional[LoopUI] = None,
         *,
         client_factory: Optional[Callable[[], PiClient]] = None,
+        clock: Optional[Callable[[], datetime]] = None,
     ) -> None:
         self.config = config
         self.ui: LoopUI = ui or NullUI()
         self._client_factory = client_factory or self._default_client_factory
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        if config.schedule_poll_interval <= 0:
+            raise ValueError("schedule_poll_interval must be positive")
+        self.schedule_decision: Optional[ScheduleDecision] = None
 
         self.state = STATE_STARTING
         self.iteration = 0
@@ -125,7 +134,11 @@ class LoopEngine:
         self.iter_start_time: Optional[float] = None
 
         self._last_completed = -1
-        self._paused = False
+        self._paused = False  # manual hold only; never set by the schedule
+        self._recovery_held = False
+        self._retry_requested = False
+        self._iteration_active = False
+        self._loop_started = False
         self._stop_requested = False
         self._seen_agent_start = False
 
@@ -135,7 +148,7 @@ class LoopEngine:
 
         self._settled = asyncio.Event()
         self._start_event = asyncio.Event()
-        self._resume_event = asyncio.Event()
+        self._control_event = asyncio.Event()
 
     # ------------------------------------------------------------------
     # Client lifecycle
@@ -160,6 +173,9 @@ class LoopEngine:
                 self.ui.log_line("stderr", str(line))
             return False
         self.reload_plan()
+        if self.config.schedule is not None:
+            self.ui.log_line("info", f"Schedule timezone: {self.config.schedule.timezone.key}")
+            self._refresh_schedule()
         self._set_state(STATE_READY)
         self.ui.log_line("start", "pi ready")
         return True
@@ -269,8 +285,14 @@ class LoopEngine:
         if self._stop_requested:
             return
 
-        self._set_state(STATE_RUNNING)
+        self._loop_started = True
+        self._refresh_schedule()
+        self._publish_admission_state()
         self.ui.log_line("start", "Loop started")
+        monitor = (
+            asyncio.create_task(self._monitor_schedule(), name="schedule-monitor")
+            if self.config.schedule is not None else None
+        )
 
         try:
             while not self._stop_requested:
@@ -290,8 +312,11 @@ class LoopEngine:
                         return
                     continue
 
+                if not await self._wait_for_admission():
+                    return
                 try:
-                    await self._run_iteration()
+                    if not await self._run_iteration():
+                        return
                 except (PiError, PiExited, PiTimeout, OSError) as exc:
                     if self._stop_requested:
                         return
@@ -318,17 +343,20 @@ class LoopEngine:
                     break
 
                 self.reload_plan()
+                if is_plan_complete(self.config.plan_file):
+                    self._finish_complete()
+                    return
                 if self._check_stall():
                     if not await self._wait_for_resume():
                         return
                     continue
 
-                if self._paused:
-                    self._set_state(STATE_PAUSED)
-                    self.ui.log_line("info", "Paused — press Space to resume")
-                    if not await self._wait_for_resume():
-                        return
         finally:
+            if monitor is not None:
+                monitor.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await monitor
+            self._loop_started = False
             self.ui.log_line("info", "Loop stopped")
 
     async def _start_iteration_client(self) -> None:
@@ -346,29 +374,37 @@ class LoopEngine:
         self._mapper = EventMapper(self.config.plan_file)
         await self._spawn_client()
 
-    async def _run_iteration(self) -> None:
+    async def _run_iteration(self) -> bool:
         try:
             await self._start_iteration_client()
         except (PiError, PiExited, OSError):
             self.client = None
             raise
+        prompt_text = self.config.prompt_file.read_text(encoding="utf-8").replace(
+            "{{PLAN_FILE}}", str(self.config.plan_file)
+        )
+        # Readiness can cross a boundary. No intervening await before dispatch
+        # once the gate returns True: this is the job's admission instant.
+        if not await self._wait_for_admission():
+            return False
         self._settled.clear()
         self._seen_agent_start = False
         assert self.client is not None
+        self._iteration_active = True
         self.iteration += 1
         self.iter_start_time = time.monotonic()
         self.ui.log_line("start", f"Iteration {self.iteration}")
         self.ui.on_progress()
-
-        prompt_text = self.config.prompt_file.read_text(encoding="utf-8").replace(
-            "{{PLAN_FILE}}", str(self.config.plan_file)
-        )
-        await self.client.prompt(prompt_text)
-        await self._await_settle()
-
-        if self.iter_start_time is not None:
+        try:
+            await self.client.prompt(prompt_text)
+            await self._await_settle()
             self.iter_times.append(time.monotonic() - self.iter_start_time)
-        self.iter_start_time = None
+        finally:
+            self.iter_start_time = None
+            self._iteration_active = False
+            self._refresh_schedule()
+            self._publish_admission_state()
+        return True
 
     async def _await_settle(self) -> None:
         """Bounded wait for `agent_settled`. Cannot hang (DESIGN §4.2)."""
@@ -462,17 +498,119 @@ class LoopEngine:
         return True
 
     async def _wait_for_resume(self) -> bool:
-        """Park until resumed. Returns False if the app is stopping."""
-        self._resume_event.clear()
-        await self._resume_event.wait()
-        if self._stop_requested:
-            return False
-        self._paused = False
-        self.stall_count = 0
-        self.error_streak = 0
-        self._set_state(STATE_RUNNING)
-        self.ui.log_line("info", "Resumed")
-        return True
+        """Recovery hold, released only by Retry (not schedule/manual resume)."""
+        self._recovery_held = True
+        try:
+            while True:
+                self._control_event.clear()
+                if self._stop_requested:
+                    return False
+                if is_plan_complete(self.config.plan_file):
+                    self._finish_complete()
+                    return False
+                self._refresh_schedule()
+                if self._retry_requested:
+                    self._retry_requested = False
+                    self.stall_count = 0
+                    self.error_streak = 0
+                    self.ui.log_line("info", "Retry hold released")
+                    return True
+                await self._wait_for_control(self.config.schedule_poll_interval)
+        finally:
+            self._recovery_held = False
+            self._publish_admission_state()
+
+    async def _wait_for_admission(self) -> bool:
+        """Wait without resetting counters or clearing a manual/recovery hold."""
+        while True:
+            # Flags/clock are checked after clearing the wakeup. No await in
+            # between: notifications cannot be lost at the wait boundary.
+            self._control_event.clear()
+            if self._stop_requested:
+                return False
+            if is_plan_complete(self.config.plan_file):
+                self._finish_complete()
+                return False
+            self._refresh_schedule()
+            self._publish_admission_state()
+            decision = self.schedule_decision
+            if (
+                not self._paused
+                and not self._recovery_held
+                and (decision is None or decision.allowed)
+            ):
+                return True
+            timeout = self.config.schedule_poll_interval
+            if decision is not None and decision.next_change is not None:
+                delta = (
+                    decision.next_change.astimezone(timezone.utc)
+                    - self._clock().astimezone(timezone.utc)
+                ).total_seconds()
+                if delta > 0:
+                    timeout = min(timeout, delta)
+            await self._wait_for_control(timeout)
+
+    async def _wait_for_control(self, timeout: float) -> None:
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(self._control_event.wait(), timeout=timeout)
+
+    async def _monitor_schedule(self) -> None:
+        while not self._stop_requested:
+            self._refresh_schedule()
+            await asyncio.sleep(self.config.schedule_poll_interval)
+
+    def _refresh_schedule(self) -> None:
+        if self.config.schedule is None:
+            return
+        previous = self.schedule_decision
+        self.schedule_decision = self.config.schedule.evaluate(self._clock())
+        decision = self.schedule_decision
+        if previous is None or (previous.allowed, previous.reasons) != (
+            decision.allowed, decision.reasons,
+        ):
+            self.ui.log_line("info", self.schedule_description)
+            self._control_event.set()
+        self._publish_admission_state()
+        if previous != decision:
+            self.ui.on_progress()
+
+    def _publish_admission_state(self) -> None:
+        if (
+            not self._loop_started
+            or self._recovery_held
+            or self.state == STATE_COMPLETE
+            or self._stop_requested
+        ):
+            return
+        blocked = self._paused or (
+            self.schedule_decision is not None and not self.schedule_decision.allowed
+        )
+        state = STATE_RUNNING
+        if blocked:
+            state = STATE_PAUSING if self._iteration_active else STATE_PAUSED
+        if self.state != state:
+            self._set_state(state)
+
+    @property
+    def manually_paused(self) -> bool:
+        return self._paused
+
+    @property
+    def schedule_description(self) -> str:
+        schedule = self.config.schedule
+        decision = self.schedule_decision
+        if schedule is None or decision is None:
+            return ""
+        zone = schedule.timezone.key
+        if decision.allowed:
+            return f"Schedule permits new jobs ({zone})"
+        description = " + ".join(decision.reasons)
+        if decision.next_allowed is not None:
+            return (
+                f"{description}; next permitted {decision.next_allowed:%Y-%m-%d %H:%M} "
+                f"{zone} ({decision.next_allowed:%Z}, UTC{decision.next_allowed:%z})"
+            )
+        return f"{description}; no upcoming permitted time ({zone})"
 
     def _finish_complete(self) -> None:
         self._set_state(STATE_COMPLETE)
@@ -495,22 +633,27 @@ class LoopEngine:
 
     def request_pause(self) -> None:
         self._paused = True
-        self._set_state(STATE_PAUSING)
+        self._publish_admission_state()
+        self._control_event.set()
 
     def request_resume(self) -> None:
         self._paused = False
-        self._resume_event.set()
+        self._publish_admission_state()
+        self._control_event.set()
 
     def request_retry(self) -> None:
+        if self.state not in (STATE_ERROR, STATE_STALLED):
+            return
         if self.state == STATE_ERROR and self.iteration >= self.config.max_iterations:
             self.config.max_iterations += 10
             self.ui.log_line("info", f"max-iterations raised to {self.config.max_iterations}")
-        self._resume_event.set()
+        self._retry_requested = True
+        self._control_event.set()
 
     def request_stop(self) -> None:
         self._stop_requested = True
         self._settled.set()
-        self._resume_event.set()
+        self._control_event.set()
         self._start_event.set()
 
     async def abort_current(self) -> None:
