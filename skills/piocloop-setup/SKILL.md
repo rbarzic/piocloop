@@ -1,11 +1,11 @@
 ---
 name: piocloop-setup
-description: Generate piocloop loop files (a PLAN.md task list and a .loop-prompt.md instruction file) so the PI coding agent can iteratively work through a backlog one task per session. Use when the user wants to run the same job for each item in a list or batch, asks to loop over a backlog with pi, or mentions piocloop, piloop, PLAN.md, loop-prompt, or orchestrating a repetitive task across many items.
+description: Generate piocloop loop files (a PLAN.md task list and a .loop-prompt.md instruction file) so the PI coding agent can iteratively work through a backlog one task per session. Use when the user wants to run the same job for each item in a list or batch, asks to loop over a backlog with pi, or mentions piocloop, piloop, PLAN.md, loop-prompt, or orchestrating a repetitive task across many items. Also configure optional timed execution with weekly run/pause windows; use for time slots, scheduling, weekday/weekend hours, or overnight runs.
 license: MIT
-compatibility: Requires piocloop installed (piloop on PATH) and the PI coding agent (pi on PATH, developed against 0.82.x). Python 3.11+.
+compatibility: Requires piocloop installed (piloop on PATH) and the PI coding agent (pi on PATH, developed against 0.82.x). Python 3.11+. Timed execution requires piocloop 0.1.4+.
 metadata:
   author: rbarzic
-  version: "1.0"
+  version: "1.1"
   project: piocloop
 ---
 
@@ -74,6 +74,9 @@ Map it like this:
 
 4. **Tell the user how to run it** (see "Launch" below). Do **not** run the loop
    yourself unless explicitly asked — `piloop run` opens an interactive TUI.
+   If time slots are requested, read
+   `references/timed-execution/scheduling.md` and add the requested windows and
+   timezone to the launcher. Leave scheduling absent when not requested.
 
 ## Key rules (these break the loop if violated)
 
@@ -142,11 +145,45 @@ piloop run \
   `anthropic/claude-sonnet-5`. Let the user pick if not specified; omitting
   `--model` uses pi's configured default.
 - `piloop doctor` checks that `pi` is installed and reports its version.
-- `--run` starts immediately; omit it to start manually by pressing `S`.
+- `--run` requests automatic start, subject to any configured windows; omit it
+  to start manually by pressing `S` (also subject to scheduling).
 - Useful guards: `--max-iterations N` (default 100), `--iteration-timeout S`
   (default 1800), `--max-stalls N` (default 3), `--log run.log`.
 - TUI keys: `S` start · `Space` pause/resume · `A` abort current iteration ·
   `R` retry/continue · `Q` quit.
+
+## Timed execution (piocloop 0.1.4+)
+
+Only add time restrictions when the user requests them. Read
+[the scheduling reference](references/timed-execution/scheduling.md) before
+configuring time slots; clarify run versus pause periods, weekday/weekend hours,
+and the intended IANA timezone rather than guessing.
+
+- `--run-window EXPR` permits new jobs inside any supplied run window (repeatable).
+- `--pause-window EXPR` blocks new jobs inside any supplied pause window
+  (repeatable); **pause takes precedence**.
+- `--schedule-timezone ZONE` applies to all windows; its default is **UTC**, not
+  machine-local time. Quote each OSM weekly expression as one shell argument.
+- Put these flags in the launch command or launcher script, **not** in
+  `PLAN.md` or `.loop-prompt.md`. Never ask the task agent to sleep, interrupt
+  work, or enforce the schedule itself.
+- A job is one iteration/Pi session. Closing a window lets the active job
+  finish normally; only new jobs wait. Watchdogs and explicit aborts remain active.
+- Manual pauses and error/stall/max-iteration holds remain independent.
+  `Space` and `R` cannot override a closed schedule.
+
+For example, append these arguments to the selected launcher to permit Friday
+night with a Saturday maintenance exclusion (adapt times and zone to the request):
+
+```bash
+--run-window 'Fr 22:00-06:00' \
+--pause-window 'Sa 02:00-03:00' \
+--schedule-timezone Europe/Paris
+```
+
+`Fr` names the starting day. Midnight introduces no gap or pause/resume
+transition. For weekday/weekend, equivalent split-window, and adjacent-pause
+configurations, load [the launch examples](references/timed-execution/examples.md).
 
 ## References (load on demand)
 
@@ -156,5 +193,9 @@ piloop run \
   advanced loop prompt** (multi-file output, research capture, batching,
   manual steps).
 
-Both are optional for a standard "for each item do X" request — the templates in
-`assets/` plus the rules above are usually enough.
+- Read `references/timed-execution/scheduling.md` whenever the user asks for time
+  slots, off-hours execution, run/pause windows, timezone handling, or overnight
+  schedules. It links to executable-form examples and the supported syntax.
+
+These references are optional for an unscheduled standard "for each item do X"
+request; the templates in `assets/` plus the rules above are usually enough.

@@ -17,11 +17,24 @@ It encodes the rules that are easy to get wrong: the `{{PLAN_FILE}}` placeholder
 per-task `[x]` marking, the `<plan-complete>` tag's column-0 requirement, and how
 stall detection interacts with `[BLOCKED]` tasks.
 
+For piocloop **0.1.4+**, it also teaches the agent to add requested run/pause
+windows to the launcher, with explicit timezone selection, weekday/weekend and
+overnight examples, and independent manual/recovery holds. Scheduling is enforced
+by piocloop, not by clock-watching instructions in the task prompt. Detailed
+agent-facing guidance lives in
+[`piocloop-setup/references/timed-execution/scheduling.md`](piocloop-setup/references/timed-execution/scheduling.md).
+
 ## Install
 
 The skill follows the [Agent Skills standard](https://agentskills.io/specification),
 so it works with any harness that implements it. Copy the whole
-`piocloop-setup/` directory (SKILL.md plus `references/` and `assets/`).
+`piocloop-setup/` directory (SKILL.md plus `references/` and `assets/`, including
+nested reference directories).
+
+Copied skills do not update automatically when piocloop is upgraded. Before
+refreshing an installed copy, compare it with the repository and preserve local
+model/launcher customizations rather than overwriting the entire directory. Run
+`/reload` in an active Pi/Pi-Bolt session after editing a skill.
 
 **PI** — global, for every project:
 
