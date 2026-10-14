@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import os
 import shutil
 import subprocess
@@ -117,6 +118,10 @@ def run(
         None, "--approve/--no-approve", help="Trust (or ignore) project-local pi files"
     ),
     pi_bin: str = typer.Option("pi", "--pi-bin", help="Path to the pi executable"),
+    firejail: bool = typer.Option(False, "--firejail", help="Launch pi through firejail"),
+    firejail_config: Optional[Path] = typer.Option(
+        None, "--firejail-config", help="JSONC file with firejail options (requires --firejail)"
+    ),
     debug: bool = typer.Option(False, "-d", "--debug", help="Skip plan/prompt file validation"),
     verbose: bool = typer.Option(False, "--verbose", help="Log every raw RPC event"),
     log: Optional[Path] = typer.Option(None, "--log", help="Append all log entries to this file"),
@@ -129,6 +134,26 @@ def run(
     if dialog_policy not in ("cancel", "allow", "deny"):
         typer.echo(f"Error: --dialog-policy must be cancel|allow|deny, got {dialog_policy!r}", err=True)
         raise typer.Exit(2)
+
+    firejail_session = None
+    if firejail_config is not None and not firejail:
+        typer.echo("Error: --firejail-config requires --firejail.", err=True)
+        raise typer.Exit(1)
+    if firejail:
+        if shutil.which("firejail") is None:
+            typer.echo("Error: --firejail requires 'firejail' to be on PATH.", err=True)
+            typer.echo("\nInstall it with:  sudo apt install firejail   (or your distro equivalent)\n", err=True)
+            raise typer.Exit(1)
+        from .firejail import build_session, load_config
+        try:
+            config = load_config(str(firejail_config)) if firejail_config is not None else None
+            firejail_session = build_session(config, cwd=directory)
+        except (OSError, ValueError) as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(1) from exc
+        # Backup: close the sandbox temp dir even if an unhandled error escapes
+        # the try/finally below.
+        atexit.register(firejail_session.close)
 
     if shutil.which(pi_bin) is None and not Path(pi_bin).exists():
         typer.echo(f"Error: {pi_bin!r} not found on PATH.", err=True)
@@ -168,6 +193,7 @@ def run(
         append_system_prompt=tuple(append_system_prompt),
         skills=tuple(skill),
         approve=approve,
+        firejail_prefix=firejail_session.prefix if firejail_session is not None else (),
     )
 
     config = LoopConfig(
@@ -182,7 +208,11 @@ def run(
         verbose=verbose,
     )
 
-    PiloopApp(config, model=model, auto_run=run_now, log_file=log).run()
+    try:
+        PiloopApp(config, model=model, auto_run=run_now, log_file=log).run()
+    finally:
+        if firejail_session is not None:
+            firejail_session.close()
 
 
 @app.command()

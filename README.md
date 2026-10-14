@@ -78,10 +78,61 @@ pi --list-models openrouter | grep kimi-k3
 | `--tools`, `--exclude-tools` | — | Passed through to pi |
 | `--append-system-prompt`, `--skill` | — | Passed through to pi (repeatable) |
 | `--approve / --no-approve` | pi's default | Project-local file trust |
+| `--firejail` | off | Run `pi` inside a firejail sandbox |
+| `--firejail-config` | — | JSONC file with firejail options (requires `--firejail`) |
 | `--verbose`, `--log`, `--debug` | — | Diagnostics |
 
 Keys: `S` start · `Space` pause · `A` abort current iteration · `R` retry ·
 `Q` quit.
+
+## Optional Firejail sandboxing
+
+Pass `--firejail` to launch every `pi` child inside a Firejail sandbox:
+
+```bash
+piloop run --firejail --model openrouter/moonshotai/kimi-k3
+```
+
+Without a config file this applies hardening only (`--noprofile`, drop all
+capabilities, no new privileges) and whitelists the working directory. The
+network is **not** restricted in that mode — a warning is printed to stderr.
+
+To also restrict the network to a set of TCP destinations, give a JSONC config
+with `--firejail-config`:
+
+```jsonc
+{
+  "allow": [
+    { "host": "aiserver01.onio.com", "port": 8000 },
+    { "host": "onio-ws09.onio.com", "port": 18080 }
+  ],
+  "whitelist": ["~/pi-eval-agent", "~/.nvm"],
+  "read_only": ["~/.nvm"],
+  "blacklist": ["/icwork"],
+  "iface": "eth0"
+}
+```
+
+```bash
+piloop run --firejail --firejail-config ./firejail.jsonc
+```
+
+* **`allow`** — TCP destinations the sandbox may reach. Each host is resolved
+  to one IPv4 at startup; a mapping is written to a static `hosts` file so no
+  DNS is needed inside the sandbox, and the netfilter rules default to DROP
+  everything else.
+* **`whitelist`** (writable), **`read_only`**, **`blacklist`** — path rules.
+  `~` is expanded. The working directory is always whitelisted.
+* **`iface`** — network interface for `--net`. Defaults to the device from
+  `ip route show default`.
+
+> In restricted mode all IPv6 is dropped; only the allowed IPv4 TCP
+> destinations (and loopback) are reachable.
+> Because Firejail hides the rest of the home directory, the whitelist must
+> include pi's agent directory and the node install.
+
+> `--firejail` must be installed (`sudo apt install firejail`).
+> `--firejail-config` without `--firejail` is an error.
 
 ## Plan format
 

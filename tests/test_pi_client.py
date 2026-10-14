@@ -95,6 +95,29 @@ def test_build_argv_no_approve():
     assert "--no-approve" in build_argv(approve=False)
 
 
+def test_build_argv_no_prefix_is_byte_identical_to_before():
+    kwargs = dict(
+        model="zai/glm-5.2",
+        thinking="medium",
+        session_dir="/tmp/s",
+        no_session=True,
+        tools="bash",
+        exclude_tools="sudo",
+        append_system_prompt=("be terse",),
+        skills=("/tmp/skill",),
+    )
+    assert build_argv(**kwargs) == build_argv(**kwargs, firejail_prefix=())
+
+
+def test_build_argv_with_firejail_prefix():
+    prefix = ["firejail", "--noprofile", "--whitelist=/work"]
+    argv = build_argv(pi_bin="pi", firejail_prefix=prefix)
+    assert argv[:3] == prefix
+    assert argv[3:] == ["pi", "--mode", "rpc"]
+    # options still come after the pi binary
+    assert "--mode" in argv and "rpc" in argv
+
+
 def test_strip_ansi():
     assert strip_ansi("\x1b[38;2;128;128;128mZ.ai:\x1b[39m 3%") == "Z.ai: 3%"
 

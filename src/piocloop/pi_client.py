@@ -92,9 +92,14 @@ def build_argv(
     skills: Sequence[str] = (),
     approve: Optional[bool] = None,
     extra_args: Sequence[str] = (),
+    firejail_prefix: Sequence[str] = (),
 ) -> list[str]:
-    """Build the `pi --mode rpc` command line."""
-    argv = [pi_bin, "--mode", "rpc"]
+    """Build the `pi --mode rpc` command line.
+
+    If ``firejail_prefix`` is given (a FirejailSession.prefix), it is prepended
+    to the whole command line so the ``pi`` child runs inside the sandbox.
+    """
+    argv = [*firejail_prefix, pi_bin, "--mode", "rpc"]
     if model:
         argv += ["--model", model]
     if thinking:
