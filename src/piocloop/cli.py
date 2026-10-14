@@ -90,6 +90,17 @@ def run(
     prompt: Path = typer.Option(".loop-prompt.md", "--prompt", help="Path to loop prompt file"),
     plan: Path = typer.Option("PLAN.md", "--plan", help="Path to plan file"),
     run_now: bool = typer.Option(False, "-r", "--run", help="Start iterations immediately"),
+    run_windows: List[str] = typer.Option(
+        [], "--run-window",
+        help="Allow new jobs inside this weekly OSM window (repeatable), e.g. 'Mo-Fr 09:00-17:00'",
+    ),
+    pause_windows: List[str] = typer.Option(
+        [], "--pause-window",
+        help="Block new jobs inside this weekly OSM window (repeatable); current jobs finish",
+    ),
+    schedule_timezone: str = typer.Option(
+        "UTC", "--schedule-timezone", help="IANA timezone for all windows, e.g. Europe/Paris",
+    ),
     max_iterations: int = typer.Option(100, "--max-iterations", help="Hard stop after N iterations"),
     iteration_timeout: float = typer.Option(
         1800.0, "--iteration-timeout", help="Seconds before an iteration is aborted"
@@ -134,6 +145,14 @@ def run(
     if dialog_policy not in ("cancel", "allow", "deny"):
         typer.echo(f"Error: --dialog-policy must be cancel|allow|deny, got {dialog_policy!r}", err=True)
         raise typer.Exit(2)
+
+    from .schedule import Schedule
+
+    try:
+        schedule = Schedule(run_windows, pause_windows, schedule_timezone)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(2) from exc
 
     firejail_session = None
     if firejail_config is not None and not firejail:
@@ -206,6 +225,7 @@ def run(
         iteration_timeout=iteration_timeout,
         max_stalls=max_stalls,
         verbose=verbose,
+        schedule=schedule if schedule.configured else None,
     )
 
     try:

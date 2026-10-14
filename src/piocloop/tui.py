@@ -233,6 +233,12 @@ class PiloopApp(App):
             )
         elif engine.state == STATE_ERROR:
             task_str = "[dim]Press [bold]R[/bold] to retry or [bold]Q[/bold] to quit[/dim]"
+        elif engine.state == STATE_PAUSED:
+            task_str = (
+                "[yellow]Manual pause — press [bold]Space[/bold] to resume[/yellow]"
+                if engine.manually_paused else
+                "[yellow]Waiting for schedule — Space toggles a separate manual pause[/yellow]"
+            )
         elif engine.state == STATE_PAUSING:
             task_str = (
                 "[yellow]Finishing current iteration — "
@@ -250,6 +256,10 @@ class PiloopApp(App):
             lines.append(row2)
         if task_str:
             lines.append(task_str)
+        if engine.config.schedule is not None:
+            schedule_str = engine.schedule_description or f"Schedule timezone: {engine.config.schedule.timezone.key}"
+            manual_str = "Manual pause + " if engine.manually_paused else ""
+            lines.append(f"[dim]{manual_str}{_escape(schedule_str)}[/dim]")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -261,11 +271,13 @@ class PiloopApp(App):
             self.engine.request_start()
 
     def action_toggle_pause(self) -> None:
-        if self.engine.state == STATE_RUNNING:
-            self.engine.request_pause()
-            self.log_line("info", "Pause requested — will stop after this iteration")
-        elif self.engine.state in (STATE_PAUSED, STATE_PAUSING):
-            self.engine.request_resume()
+        if self.engine.state in (STATE_RUNNING, STATE_PAUSED, STATE_PAUSING):
+            if self.engine.manually_paused:
+                self.engine.request_resume()
+                self.log_line("info", "Manual pause released; schedule restrictions still apply")
+            else:
+                self.engine.request_pause()
+                self.log_line("info", "Manual pause requested — current iteration may finish")
         self._refresh_header()
 
     def action_abort_now(self) -> None:
