@@ -1,11 +1,8 @@
-"""CLI-level tests for the Firejail options.
-
-`firejail` itself must never be invoked; the `--firejail` error paths are
-exercised by pretending it is (or is not) on PATH.
-"""
+"""CLI-level tests for version reporting, diagnostics, and run options."""
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -14,9 +11,75 @@ import pytest
 from typer.testing import CliRunner
 
 import piocloop.cli as cli_module
+from piocloop import __version__
 from piocloop.cli import app
 
 runner = CliRunner()
+
+
+def test_version_exits_without_probing_pi(monkeypatch):
+    def unexpected_probe(*args, **kwargs):
+        pytest.fail("--version must not require Pi")
+
+    monkeypatch.setattr(cli_module.shutil, "which", unexpected_probe)
+    monkeypatch.setattr(cli_module, "_pi_version", unexpected_probe)
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == f"piocloop {__version__}"
+
+
+def test_help_documents_version():
+    result = runner.invoke(app, ["--help"], env={"COLUMNS": "160", "TERM": "dumb"})
+    assert result.exit_code == 0
+    assert "--version" in result.output
+
+
+@pytest.mark.parametrize("pi_version", ["0.82.1", "9.9.9", None])
+def test_doctor_labels_both_versions(monkeypatch, pi_version):
+    monkeypatch.setattr(cli_module.shutil, "which", lambda _: "/usr/bin/custom-pi")
+    monkeypatch.setattr(cli_module, "_pi_version", lambda _: pi_version)
+    result = runner.invoke(app, ["doctor", "--pi-bin", "custom-pi"])
+    assert result.exit_code == 0, result.output
+    assert f"piocloop: {__version__}" in result.output
+    assert "pi:      /usr/bin/custom-pi" in result.output
+    assert f"pi version: {pi_version or 'unknown'}" in result.output
+    assert ("outside tested range" in result.output) == (pi_version == "9.9.9")
+
+
+def test_doctor_reports_own_version_when_pi_missing(monkeypatch):
+    monkeypatch.setattr(cli_module.shutil, "which", lambda _: None)
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 1
+    assert f"piocloop: {__version__}" in result.output
+    assert "NOT FOUND" in result.output
+
+
+@pytest.mark.parametrize("stdout,stderr,returncode,expected", [
+    ("0.82.1\n", "", 0, "0.82.1"),
+    ("", "0.82.1\n", 0, "0.82.1"),
+    (" \n", "0.82.1\n", 0, "0.82.1"),
+    ("0.82.1\nextra output\n", "", 0, "0.82.1"),
+    ("", "", 0, None),
+    (" \n", "\t", 0, None),
+    ("0.82.1", "failure", 1, None),
+])
+def test_pi_version_output(monkeypatch, stdout, stderr, returncode, expected):
+    def fake_run(argv, **kwargs):
+        assert argv == ["custom-pi", "--version"]
+        assert kwargs == {"capture_output": True, "text": True, "timeout": 20}
+        return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    assert cli_module._pi_version("custom-pi") == expected
+
+
+@pytest.mark.parametrize("error", [OSError("not executable"), subprocess.TimeoutExpired("pi", 20)])
+def test_pi_version_probe_failure(monkeypatch, error):
+    def fake_run(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    assert cli_module._pi_version("custom-pi") is None
 
 
 def test_firejail_config_without_firejail_errors(tmp_path):

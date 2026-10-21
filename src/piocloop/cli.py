@@ -11,6 +11,8 @@ from typing import List, Optional
 
 import typer
 
+from . import __version__
+
 app = typer.Typer(
     name="piloop",
     help="piocloop — orchestrate the PI coding agent to execute tasks from a PLAN.md file iteratively.",
@@ -19,6 +21,23 @@ app = typer.Typer(
 )
 
 TESTED_PI_VERSIONS = ("0.82",)
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"piocloop {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def main(
+    version: bool = typer.Option(
+        False, "--version", callback=_version_callback, is_eager=True,
+        help="Show the piocloop version and exit.",
+    ),
+) -> None:
+    """Manage the piocloop orchestration loop."""
+
 
 _PLAN_TEMPLATE = """\
 # Project Plan
@@ -74,7 +93,10 @@ def _pi_version(pi_bin: str) -> Optional[str]:
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    return (out.stdout or out.stderr).strip().splitlines()[0] if out.returncode == 0 else None
+    if out.returncode != 0:
+        return None
+    lines = (out.stdout.strip() or out.stderr.strip()).splitlines()
+    return lines[0] if lines else None
 
 
 @app.command()
@@ -271,13 +293,14 @@ def bootstrap(
 def doctor(
     pi_bin: str = typer.Option("pi", "--pi-bin", help="Path to the pi executable"),
 ) -> None:
-    """Check that pi is installed and reachable."""
+    """Report piocloop and pi versions and check that pi is reachable."""
+    typer.echo(f"piocloop: {__version__}")
     path = shutil.which(pi_bin)
     if path is None:
         typer.echo(f"pi:      NOT FOUND ({pi_bin!r} is not on PATH)")
         raise typer.Exit(1)
     version = _pi_version(pi_bin)
     typer.echo(f"pi:      {path}")
-    typer.echo(f"version: {version or 'unknown'}")
+    typer.echo(f"pi version: {version or 'unknown'}")
     if version and not any(version.startswith(v) for v in TESTED_PI_VERSIONS):
         typer.echo(f"warning: outside tested range ({', '.join(TESTED_PI_VERSIONS)}.x)")

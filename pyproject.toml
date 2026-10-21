@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "piocloop"
-version = "0.1.5"
+version = "0.1.6"
 description = "TUI loop harness that orchestrates the PI coding agent to execute tasks from a PLAN.md file iteratively"
 readme = "README.md"
 license = { text = "MIT" }

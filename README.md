@@ -40,7 +40,8 @@ pip install .
 ## Usage
 
 ```bash
-piloop doctor                    # check pi is installed and reachable
+piloop --version                 # show the piocloop version
+piloop doctor                    # show piocloop/pi versions and check pi is reachable
 piloop bootstrap .               # create starter PLAN.md and .loop-prompt.md
 piloop run --model zai/glm-5.2
 ```
